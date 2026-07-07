@@ -236,137 +236,144 @@ ${catalogText}
 
 // API Route: Get Supabase database status, table checks and size in MB
 app.get('/api/supabase/status', async (req, res) => {
-  const connectionString = process.env.DATABASE_URL || process.env.VITE_SUPABASE_DB_URL;
-  const supabaseUrl = process.env.VITE_SUPABASE_URL;
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+  try {
+    const connectionString = process.env.DATABASE_URL || process.env.VITE_SUPABASE_DB_URL;
+    const supabaseUrl = process.env.VITE_SUPABASE_URL;
+    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
 
-  const expectedTables = [
-    'settings', 'ticker_texts', 'locations', 'categories', 
-    'users', 'products', 'orders', 'gifts', 'recharges', 
-    'phone_requests', 'notifications', 'targeted_notifications', 
-    'targeted_gifts', 'targeted_gift_logs'
-  ];
+    const expectedTables = [
+      'settings', 'ticker_texts', 'locations', 'categories', 
+      'users', 'products', 'orders', 'gifts', 'recharges', 
+      'phone_requests', 'notifications', 'targeted_notifications', 
+      'targeted_gifts', 'targeted_gift_logs'
+    ];
 
-  // Try the Supabase HTTP/HTTPS Client API first (Port 443) because port 5432 is typically blocked in sandbox containers.
-  // This avoids a 2-second timeout delay, making the check instantaneous.
-  if (supabaseUrl && supabaseServiceKey) {
-    try {
-      const sClient = createClient(supabaseUrl, supabaseServiceKey);
-      const tablesExist: Record<string, boolean> = {};
-      const recordCounts: Record<string, number> = {};
-      let existingTablesCount = 0;
+    // Try the Supabase HTTP/HTTPS Client API first (Port 443) because port 5432 is typically blocked in sandbox containers.
+    if (supabaseUrl && supabaseServiceKey) {
+      try {
+        const sClient = createClient(supabaseUrl, supabaseServiceKey);
+        const tablesExist: Record<string, boolean> = {};
+        const recordCounts: Record<string, number> = {};
+        let existingTablesCount = 0;
 
-      // Query table existence and count using HTTP/HTTPS select head calls
-      await Promise.all(expectedTables.map(async (tab) => {
-        try {
-          const { count, error } = await sClient
-            .from(tab)
-            .select('*', { count: 'exact', head: true });
+        // Query table existence and count using HTTP/HTTPS select head calls
+        await Promise.all(expectedTables.map(async (tab) => {
+          try {
+            const { count, error } = await sClient
+              .from(tab)
+              .select('*', { count: 'exact', head: true });
 
-          if (error) {
-            const isNotExist = error.code === '42P01' || error.code === 'PGRST116' || error.message?.includes('does not exist') || error.message?.includes('not found');
-            if (isNotExist) {
-              tablesExist[tab] = false;
-              recordCounts[tab] = 0;
+            if (error) {
+              const isNotExist = error.code === '42P01' || error.code === 'PGRST116' || error.message?.includes('does not exist') || error.message?.includes('not found');
+              if (isNotExist) {
+                tablesExist[tab] = false;
+                recordCounts[tab] = 0;
+              } else {
+                tablesExist[tab] = true;
+                recordCounts[tab] = 0;
+                existingTablesCount++;
+              }
             } else {
               tablesExist[tab] = true;
-              recordCounts[tab] = 0;
+              recordCounts[tab] = count || 0;
               existingTablesCount++;
             }
-          } else {
-            tablesExist[tab] = true;
-            recordCounts[tab] = count || 0;
-            existingTablesCount++;
+          } catch (e) {
+            tablesExist[tab] = false;
+            recordCounts[tab] = 0;
           }
-        } catch (e) {
-          tablesExist[tab] = false;
-          recordCounts[tab] = 0;
-        }
-      }));
+        }));
 
-      return res.json({
-        pgConnected: true, // We return true because the database API is fully connected and ready to use
-        viaHttpProxy: true,
-        databaseSizeMB: '~4.5 MB (سحابي)',
-        tablesCount: existingTablesCount,
-        tablesExist,
-        recordCounts,
-        supabaseUrl: supabaseUrl
-      });
-    } catch (fallbackErr: any) {
-      console.warn('[Supabase DB Status] HTTP Client check failed, attempting PG direct connection fallback...', fallbackErr?.message || fallbackErr);
-    }
-  }
-
-  // Fallback to direct pg connection if HTTP client isn't configured or failed
-  if (!connectionString) {
-    return res.json({
-      pgConnected: false,
-      error: 'لم يتم العثور على DATABASE_URL أو مفاتيح الاتصال بـ Supabase في متغيرات البيئة.'
-    });
-  }
-
-  const { Client } = pg;
-  const client = new Client({
-    connectionString,
-    connectionTimeoutMillis: 1500,
-    ssl: { rejectUnauthorized: false }
-  });
-
-  try {
-    await client.connect();
-    
-    // Check if tables exist in the public schema
-    const tablesQuery = `
-      SELECT table_name 
-      FROM information_schema.tables 
-      WHERE table_schema = 'public';
-    `;
-    const tablesRes = await client.query(tablesQuery);
-    const existingTables = tablesRes.rows.map(r => r.table_name);
-    
-    // Check database size pretty format
-    const sizeQuery = `
-      SELECT pg_size_pretty(pg_database_size(current_database())) as size;
-    `;
-    const sizeRes = await client.query(sizeQuery);
-    const dbSize = sizeRes.rows[0]?.size || '0 MB';
-
-    const tablesExist: Record<string, boolean> = {};
-    const recordCounts: Record<string, number> = {};
-
-    for (const tab of expectedTables) {
-      const exists = existingTables.includes(tab);
-      tablesExist[tab] = exists;
-      if (exists) {
-        try {
-          const countRes = await client.query(`SELECT COUNT(*) FROM "${tab}"`);
-          recordCounts[tab] = parseInt(countRes.rows[0].count, 10);
-        } catch (e) {
-          recordCounts[tab] = 0;
-        }
-      } else {
-        recordCounts[tab] = 0;
+        return res.json({
+          pgConnected: true, 
+          viaHttpProxy: true,
+          databaseSizeMB: '~4.5 MB (سحابي)',
+          tablesCount: existingTablesCount,
+          tablesExist,
+          recordCounts,
+          supabaseUrl: supabaseUrl
+        });
+      } catch (fallbackErr: any) {
+        console.warn('[Supabase DB Status] HTTP Client check failed, attempting PG direct connection fallback...', fallbackErr?.message || fallbackErr);
       }
     }
 
-    await client.end();
+    // Fallback to direct pg connection if HTTP client isn't configured or failed
+    if (!connectionString) {
+      return res.json({
+        pgConnected: false,
+        error: 'لم يتم العثور على DATABASE_URL أو مفاتيح الاتصال بـ Supabase في متغيرات البيئة.'
+      });
+    }
 
-    res.json({
-      pgConnected: true,
-      databaseSizeMB: dbSize,
-      tablesCount: existingTables.length,
-      tablesExist,
-      recordCounts,
-      supabaseUrl: process.env.VITE_SUPABASE_URL || 'غير معرّف'
+    const { Client } = pg;
+    const client = new Client({
+      connectionString,
+      connectionTimeoutMillis: 1500,
+      ssl: { rejectUnauthorized: false }
     });
 
-  } catch (err: any) {
-    console.error('[Supabase DB Status] PG direct connection failed:', err);
-    try { await client.end(); } catch (e) {}
-    res.json({
+    try {
+      await client.connect();
+      
+      // Check if tables exist in the public schema
+      const tablesQuery = `
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public';
+      `;
+      const tablesRes = await client.query(tablesQuery);
+      const existingTables = tablesRes.rows.map(r => r.table_name);
+      
+      // Check database size pretty format
+      const sizeQuery = `
+        SELECT pg_size_pretty(pg_database_size(current_database())) as size;
+      `;
+      const sizeRes = await client.query(sizeQuery);
+      const dbSize = sizeRes.rows[0]?.size || '0 MB';
+
+      const tablesExist: Record<string, boolean> = {};
+      const recordCounts: Record<string, number> = {};
+
+      for (const tab of expectedTables) {
+        const exists = existingTables.includes(tab);
+        tablesExist[tab] = exists;
+        if (exists) {
+          try {
+            const countRes = await client.query(`SELECT COUNT(*) FROM "${tab}"`);
+            recordCounts[tab] = parseInt(countRes.rows[0].count, 10);
+          } catch (e) {
+            recordCounts[tab] = 0;
+          }
+        } else {
+          recordCounts[tab] = 0;
+        }
+      }
+
+      await client.end();
+
+      return res.json({
+        pgConnected: true,
+        databaseSizeMB: dbSize,
+        tablesCount: existingTables.length,
+        tablesExist,
+        recordCounts,
+        supabaseUrl: process.env.VITE_SUPABASE_URL || 'غير معرّف'
+      });
+
+    } catch (err: any) {
+      console.error('[Supabase DB Status] PG direct connection failed:', err);
+      try { await client.end(); } catch (e) {}
+      return res.json({
+        pgConnected: false,
+        error: `تعذر الاتصال بقاعدة البيانات مباشرة: ${err.message || String(err)}`
+      });
+    }
+  } catch (outerError: any) {
+    console.error('[Outer Status Error] Critical crash caught:', outerError);
+    return res.json({
       pgConnected: false,
-      error: `تعذر الاتصال بقاعدة البيانات: ${err.message || String(err)}`
+      error: `خطأ داخلي مباغت في الخادم: ${outerError.message || String(outerError)}`
     });
   }
 });
